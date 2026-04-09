@@ -36,12 +36,6 @@
         'security/ir.model.access.csv',
         'wizard/attendance_report_wizard_views.xml',
     ],
-    'images': [
-        'static/description/banner.png',
-        'static/description/screenshot_1.png',
-        'static/description/screenshot_2.png',
-        'static/description/screenshot_3.png',
-    ],
     'license': 'LGPL-3',
     'auto_install': False,
     'installable': True,
