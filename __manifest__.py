@@ -31,7 +31,7 @@
     ''',
     'author': 'Aspire Analytica',
     'website': 'https://www.aspireanalytica.com',
-    'depends': ['hr_attendance'],
+    'depends': ['hr_attendance','hr'],
     'data': [
         'security/ir.model.access.csv',
         'wizard/attendance_report_wizard_views.xml',
