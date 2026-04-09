@@ -15,7 +15,7 @@
                         <field name="department_ids" widget="many2many_tags"/>
                     </group>
                 </group>
-                <group string="Download" attrs="{'invisible': [('file_data', '=', False)]}">
+                <group string="Download" invisible="file_data == False">
                     <field name="file_data" filename="filename" widget="binary" string="XLSX File"/>
                     <field name="filename" invisible="1"/>
                 </group>
