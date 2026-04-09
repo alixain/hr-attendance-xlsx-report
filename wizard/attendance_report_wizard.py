@@ -20,7 +20,7 @@ def _default_date_to(self):
 
 
 class AttendanceReportWizard(models.TransientModel):
-    _name = 'attendance.report.wizard'
+    _name = 'xattendance.report.wizard'
     _description = 'Attendance XLSX Report Wizard'
 
     date_from = fields.Date(string='Date From', required=True, default=_default_date_from)
