@@ -59,10 +59,6 @@ class AttendanceReportWizard(models.TransientModel):
             emp_date[att.employee_id][ci_local.date()].append(att)
 
         all_dates = sorted({d for ed in emp_date.values() for d in ed})
-        max_pairs = max(
-            (len(recs) for ed in emp_date.values() for recs in ed.values()),
-            default=1,
-        )
 
         output = io.BytesIO()
         wb = xlsxwriter.Workbook(output, {'in_memory': True})
@@ -93,18 +89,11 @@ class AttendanceReportWizard(models.TransientModel):
         date_col_map = {}
         for d in all_dates:
             date_col_map[d] = col
-            span = max_pairs * 2
-            if span > 1:
-                ws.merge_range(0, col, 0, col + span - 1, d.strftime('%d-%b-%Y'), dhdr)
-            else:
-                ws.write(0, col, d.strftime('%d-%b-%Y'), dhdr)
-            for p in range(max_pairs):
-                label_in = 'Check In' if max_pairs == 1 else f'In {p + 1}'
-                label_out = 'Check Out' if max_pairs == 1 else f'Out {p + 1}'
-                ws.write(1, col + p * 2, label_in, hdr)
-                ws.write(1, col + p * 2 + 1, label_out, hdr)
-            ws.set_column(col, col + span - 1, 12)
-            col += span
+            ws.merge_range(0, col, 0, col + 1, d.strftime('%d-%b-%Y'), dhdr)
+            ws.write(1, col, 'First Check In', hdr)
+            ws.write(1, col + 1, 'Last Check Out', hdr)
+            ws.set_column(col, col + 1, 16)
+            col += 2
 
         ws.freeze_panes(2, len(fixed))
 
@@ -118,17 +107,23 @@ class AttendanceReportWizard(models.TransientModel):
             ws.write(row, 3, emp.job_id.name if emp.job_id else '', cell)
 
             for d, start_col in date_col_map.items():
-                records = sorted(date_map.get(d, []), key=lambda r: r.check_in)
-                for p, att in enumerate(records[:max_pairs]):
-                    ci_l = fields.Datetime.context_timestamp(att, att.check_in)
-                    co_l = (fields.Datetime.context_timestamp(att, att.check_out)
-                            if att.check_out else None)
-                    ws.write_datetime(row, start_col + p * 2, ci_l.replace(tzinfo=None), tfmt)
-                    if co_l:
-                        ws.write_datetime(row, start_col + p * 2 + 1,
-                                          co_l.replace(tzinfo=None), tfmt)
+                recs = date_map.get(d, [])
+                if recs:
+                    first_check_in = min(r.check_in for r in recs)
+                    last_check_out = max(
+                        (r.check_out for r in recs if r.check_out),
+                        default=None,
+                    )
+                    ci_local = fields.Datetime.context_timestamp(self, first_check_in)
+                    ws.write_datetime(row, start_col, ci_local.replace(tzinfo=None), tfmt)
+                    if last_check_out:
+                        co_local = fields.Datetime.context_timestamp(self, last_check_out)
+                        ws.write_datetime(row, start_col + 1, co_local.replace(tzinfo=None), tfmt)
                     else:
-                        ws.write(row, start_col + p * 2 + 1, '', cell)
+                        ws.write(row, start_col + 1, '', cell)
+                else:
+                    ws.write(row, start_col, '', cell)
+                    ws.write(row, start_col + 1, '', cell)
             row += 1
 
         wb.close()
