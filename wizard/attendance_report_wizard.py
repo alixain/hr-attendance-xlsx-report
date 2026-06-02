@@ -97,6 +97,21 @@ class AttendanceReportWizard(models.TransientModel):
             emp_paid_days[leave.employee_id.id] += leave.number_of_days
 
         # ------------------------------------------------------------------
+        # Joining Date – earliest contract date_start per employee
+        # ------------------------------------------------------------------
+        emp_joining_date = {}
+        try:
+            contracts = self.env['hr.contract'].sudo().search([
+                ('employee_id', 'in', employee_ids_in_report),
+            ], order='date_start asc')
+            for contract in contracts:
+                eid = contract.employee_id.id
+                if eid not in emp_joining_date:
+                    emp_joining_date[eid] = contract.date_start
+        except Exception:
+            pass  # hr.contract may not be installed
+
+        # ------------------------------------------------------------------
         # Build workbook
         # ------------------------------------------------------------------
         output = io.BytesIO()
@@ -201,10 +216,11 @@ class AttendanceReportWizard(models.TransientModel):
             ws.write(row, 3, emp.job_id.name if emp.job_id else '',      cell)
             ws.write(row, 4, emp.department_id.name if emp.department_id else '', cell)
 
-            if emp.date_start:
+            joining = emp_joining_date.get(emp.id)
+            if joining:
                 ws.write_datetime(
                     row, 5,
-                    datetime.combine(emp.date_start, datetime.min.time()),
+                    datetime.combine(joining, datetime.min.time()),
                     date_cell,
                 )
             else:
