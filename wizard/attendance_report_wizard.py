@@ -1,7 +1,7 @@
 import base64
 import io
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from odoo import fields, models, _
 from odoo.exceptions import UserError
@@ -72,8 +72,17 @@ class AttendanceReportWizard(models.TransientModel):
             'bold': True, 'bg_color': '#2E75B6', 'font_color': 'white',
             'border': 1, 'align': 'center', 'valign': 'vcenter',
         })
+        total_hdr = wb.add_format({
+            'bold': True, 'bg_color': '#375623', 'font_color': 'white',
+            'border': 1, 'align': 'center', 'valign': 'vcenter', 'text_wrap': True,
+        })
         cell = wb.add_format({'border': 1, 'valign': 'vcenter'})
         tfmt = wb.add_format({'border': 1, 'valign': 'vcenter', 'num_format': 'hh:mm:ss'})
+        dur_fmt = wb.add_format({'border': 1, 'valign': 'vcenter', 'num_format': '[h]:mm:ss'})
+        grand_fmt = wb.add_format({
+            'bold': True, 'border': 1, 'valign': 'vcenter',
+            'num_format': '[h]:mm:ss', 'bg_color': '#E2EFDA',
+        })
 
         ws.set_row(0, 30)
         ws.set_row(1, 20)
@@ -89,11 +98,18 @@ class AttendanceReportWizard(models.TransientModel):
         date_col_map = {}
         for d in all_dates:
             date_col_map[d] = col
-            ws.merge_range(0, col, 0, col + 1, d.strftime('%d-%b-%Y'), dhdr)
+            ws.merge_range(0, col, 0, col + 2, d.strftime('%d-%b-%Y'), dhdr)
             ws.write(1, col, 'First Check In', hdr)
             ws.write(1, col + 1, 'Last Check Out', hdr)
+            ws.write(1, col + 2, 'Total Time', hdr)
             ws.set_column(col, col + 1, 16)
-            col += 2
+            ws.set_column(col + 2, col + 2, 12)
+            col += 3
+
+        # Grand total column
+        grand_total_col = col
+        ws.merge_range(0, grand_total_col, 1, grand_total_col, 'Total Time\n(All Days)', total_hdr)
+        ws.set_column(grand_total_col, grand_total_col, 14)
 
         ws.freeze_panes(2, len(fixed))
 
@@ -105,6 +121,8 @@ class AttendanceReportWizard(models.TransientModel):
             ws.write(row, 1, emp.x_zk_user_id or '', cell)
             ws.write(row, 2, emp.name, cell)
             ws.write(row, 3, emp.job_id.name if emp.job_id else '', cell)
+
+            grand_total_seconds = 0
 
             for d, start_col in date_col_map.items():
                 recs = date_map.get(d, [])
@@ -119,11 +137,24 @@ class AttendanceReportWizard(models.TransientModel):
                     if last_check_out:
                         co_local = fields.Datetime.context_timestamp(self, last_check_out)
                         ws.write_datetime(row, start_col + 1, co_local.replace(tzinfo=None), tfmt)
+                        day_seconds = (last_check_out - first_check_in).total_seconds()
+                        grand_total_seconds += day_seconds
+                        # Excel stores time as fraction of a day
+                        ws.write_number(row, start_col + 2, day_seconds / 86400.0, dur_fmt)
                     else:
                         ws.write(row, start_col + 1, '', cell)
+                        ws.write(row, start_col + 2, '', cell)
                 else:
                     ws.write(row, start_col, '', cell)
                     ws.write(row, start_col + 1, '', cell)
+                    ws.write(row, start_col + 2, '', cell)
+
+            # Write grand total for this employee
+            if grand_total_seconds:
+                ws.write_number(row, grand_total_col, grand_total_seconds / 86400.0, grand_fmt)
+            else:
+                ws.write(row, grand_total_col, '', grand_fmt)
+
             row += 1
 
         wb.close()
