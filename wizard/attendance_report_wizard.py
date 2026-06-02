@@ -1,7 +1,7 @@
 import base64
 import io
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 from odoo import fields, models, _
 from odoo.exceptions import UserError
@@ -60,10 +60,50 @@ class AttendanceReportWizard(models.TransientModel):
 
         all_dates = sorted({d for ed in emp_date.values() for d in ed})
 
+        # ------------------------------------------------------------------
+        # Gazetted / Public Holidays in the date range
+        # resource.calendar.leaves with resource_id = False are company-wide
+        # ------------------------------------------------------------------
+        dt_from = fields.Datetime.from_string(str(self.date_from) + ' 00:00:00')
+        dt_to = fields.Datetime.from_string(str(self.date_to) + ' 23:59:59')
+
+        public_leaves = self.env['resource.calendar.leaves'].sudo().search([
+            ('resource_id', '=', False),
+            ('date_from', '<=', dt_to),
+            ('date_to', '>=', dt_from),
+        ])
+        gazetted_dates = set()
+        for lv in public_leaves:
+            lv_start = fields.Datetime.context_timestamp(self, lv.date_from).date()
+            lv_end = fields.Datetime.context_timestamp(self, lv.date_to).date()
+            cur = max(lv_start, self.date_from)
+            while cur <= min(lv_end, self.date_to):
+                gazetted_dates.add(cur)
+                cur += timedelta(days=1)
+        gazetted_count = len(gazetted_dates)
+
+        # ------------------------------------------------------------------
+        # Paid Leaves per employee (validated leave requests in date range)
+        # ------------------------------------------------------------------
+        employee_ids_in_report = [emp.id for emp in emp_date]
+        paid_leaves_recs = self.env['hr.leave'].sudo().search([
+            ('state', '=', 'validate'),
+            ('employee_id', 'in', employee_ids_in_report),
+            ('date_from', '<=', str(self.date_to) + ' 23:59:59'),
+            ('date_to', '>=', str(self.date_from) + ' 00:00:00'),
+        ])
+        emp_paid_days = defaultdict(float)
+        for leave in paid_leaves_recs:
+            emp_paid_days[leave.employee_id.id] += leave.number_of_days
+
+        # ------------------------------------------------------------------
+        # Build workbook
+        # ------------------------------------------------------------------
         output = io.BytesIO()
         wb = xlsxwriter.Workbook(output, {'in_memory': True})
         ws = wb.add_worksheet('Attendance')
 
+        # --- Formats ---
         hdr = wb.add_format({
             'bold': True, 'bg_color': '#1F497D', 'font_color': 'white',
             'border': 1, 'align': 'center', 'valign': 'vcenter', 'text_wrap': True,
@@ -72,58 +112,108 @@ class AttendanceReportWizard(models.TransientModel):
             'bold': True, 'bg_color': '#2E75B6', 'font_color': 'white',
             'border': 1, 'align': 'center', 'valign': 'vcenter',
         })
-        total_hdr = wb.add_format({
+        summary_hdr = wb.add_format({
             'bold': True, 'bg_color': '#375623', 'font_color': 'white',
             'border': 1, 'align': 'center', 'valign': 'vcenter', 'text_wrap': True,
         })
         cell = wb.add_format({'border': 1, 'valign': 'vcenter'})
+        date_cell = wb.add_format({
+            'border': 1, 'valign': 'vcenter', 'num_format': 'dd-mmm-yyyy',
+        })
         tfmt = wb.add_format({'border': 1, 'valign': 'vcenter', 'num_format': 'hh:mm:ss'})
         dur_fmt = wb.add_format({'border': 1, 'valign': 'vcenter', 'num_format': '[h]:mm:ss'})
-        grand_fmt = wb.add_format({
+        grand_time_fmt = wb.add_format({
             'bold': True, 'border': 1, 'valign': 'vcenter',
             'num_format': '[h]:mm:ss', 'bg_color': '#E2EFDA',
         })
+        int_cell = wb.add_format({'border': 1, 'valign': 'vcenter', 'num_format': '#,##0'})
+        dec_cell = wb.add_format({'border': 1, 'valign': 'vcenter', 'num_format': '#,##0.00'})
+        summary_int = wb.add_format({
+            'bold': True, 'border': 1, 'valign': 'vcenter',
+            'num_format': '#,##0', 'bg_color': '#E2EFDA',
+        })
+        summary_dec = wb.add_format({
+            'bold': True, 'border': 1, 'valign': 'vcenter',
+            'num_format': '#,##0.00', 'bg_color': '#E2EFDA',
+        })
 
-        ws.set_row(0, 30)
+        # --- Row heights ---
+        ws.set_row(0, 32)
         ws.set_row(1, 20)
-        fixed = ['#', 'Emp ID', 'Name', 'Designation']
-        for i, h in enumerate(fixed):
-            ws.merge_range(0, i, 1, i, h, hdr)
-        ws.set_column(0, 0, 5)
-        ws.set_column(1, 1, 14)
-        ws.set_column(2, 2, 24)
-        ws.set_column(3, 3, 20)
 
-        col = len(fixed)
+        # --- Fixed columns (rows 0‑1 merged) ---
+        fixed_cols = [
+            ('#',            5),
+            ('Emp ID',      14),
+            ('Name',        24),
+            ('Designation', 20),
+            ('Department',  20),
+            ('Joining\nDate', 14),
+        ]
+        for i, (label, width) in enumerate(fixed_cols):
+            ws.merge_range(0, i, 1, i, label, hdr)
+            ws.set_column(i, i, width)
+
+        # --- Per-date columns ---
+        col = len(fixed_cols)
         date_col_map = {}
         for d in all_dates:
             date_col_map[d] = col
             ws.merge_range(0, col, 0, col + 2, d.strftime('%d-%b-%Y'), dhdr)
-            ws.write(1, col, 'First Check In', hdr)
-            ws.write(1, col + 1, 'Last Check Out', hdr)
-            ws.write(1, col + 2, 'Total Time', hdr)
-            ws.set_column(col, col + 1, 16)
+            ws.write(1, col,     'First Check In',  hdr)
+            ws.write(1, col + 1, 'Last Check Out',  hdr)
+            ws.write(1, col + 2, 'Total Time',      hdr)
+            ws.set_column(col,     col + 1, 16)
             ws.set_column(col + 2, col + 2, 12)
             col += 3
 
-        # Grand total column
-        grand_total_col = col
-        ws.merge_range(0, grand_total_col, 1, grand_total_col, 'Total Time\n(All Days)', total_hdr)
-        ws.set_column(grand_total_col, grand_total_col, 14)
+        # --- Summary columns (rows 0‑1 merged, green header) ---
+        summary_defs = [
+            # (key,               label,                   width, is_time)
+            ('grand_total',      'Total Time\n(All Days)',  14,   True),
+            ('present_days',     'Present\nDays',           10,   False),
+            ('gazetted',         'Gazetted\nHolidays',      12,   False),
+            ('paid_leaves',      'Paid\nLeaves',            10,   False),
+            ('total_hours',      'Total\nHours',            10,   False),
+            ('total_worked_days','Total Worked\nDays',      13,   False),
+            ('avg_worked_hours', 'Avg Worked\nHours',       13,   False),
+        ]
+        summary_col = {}
+        for i, (key, label, width, _) in enumerate(summary_defs):
+            c = col + i
+            summary_col[key] = c
+            ws.merge_range(0, c, 1, c, label, summary_hdr)
+            ws.set_column(c, c, width)
 
-        ws.freeze_panes(2, len(fixed))
+        ws.freeze_panes(2, len(fixed_cols))
 
+        # ------------------------------------------------------------------
+        # Data rows
+        # ------------------------------------------------------------------
         row = 2
         for seq, (emp, date_map) in enumerate(
             sorted(emp_date.items(), key=lambda x: x[0].name), start=1
         ):
-            ws.write(row, 0, seq, cell)
-            ws.write(row, 1, emp.x_zk_user_id or '', cell)
-            ws.write(row, 2, emp.name, cell)
-            ws.write(row, 3, emp.job_id.name if emp.job_id else '', cell)
+            # Fixed columns
+            ws.write(row, 0, seq,                                        cell)
+            ws.write(row, 1, emp.x_zk_user_id or '',                    cell)
+            ws.write(row, 2, emp.name,                                   cell)
+            ws.write(row, 3, emp.job_id.name if emp.job_id else '',      cell)
+            ws.write(row, 4, emp.department_id.name if emp.department_id else '', cell)
+
+            if emp.date_start:
+                ws.write_datetime(
+                    row, 5,
+                    datetime.combine(emp.date_start, datetime.min.time()),
+                    date_cell,
+                )
+            else:
+                ws.write(row, 5, '', cell)
 
             grand_total_seconds = 0
+            present_days = 0
 
+            # Per-date columns
             for d, start_col in date_col_map.items():
                 recs = date_map.get(d, [])
                 if recs:
@@ -139,21 +229,37 @@ class AttendanceReportWizard(models.TransientModel):
                         ws.write_datetime(row, start_col + 1, co_local.replace(tzinfo=None), tfmt)
                         day_seconds = (last_check_out - first_check_in).total_seconds()
                         grand_total_seconds += day_seconds
-                        # Excel stores time as fraction of a day
+                        present_days += 1
+                        # Excel time = fraction of a day
                         ws.write_number(row, start_col + 2, day_seconds / 86400.0, dur_fmt)
                     else:
                         ws.write(row, start_col + 1, '', cell)
                         ws.write(row, start_col + 2, '', cell)
                 else:
-                    ws.write(row, start_col, '', cell)
+                    ws.write(row, start_col,     '', cell)
                     ws.write(row, start_col + 1, '', cell)
                     ws.write(row, start_col + 2, '', cell)
 
-            # Write grand total for this employee
+            # Derived summary values
+            total_hours = grand_total_seconds / 3600.0
+            avg_worked_hours = total_hours / present_days if present_days else 0.0
+            paid_days = emp_paid_days.get(emp.id, 0)
+
+            # Write summary columns
             if grand_total_seconds:
-                ws.write_number(row, grand_total_col, grand_total_seconds / 86400.0, grand_fmt)
+                ws.write_number(
+                    row, summary_col['grand_total'],
+                    grand_total_seconds / 86400.0, grand_time_fmt,
+                )
             else:
-                ws.write(row, grand_total_col, '', grand_fmt)
+                ws.write(row, summary_col['grand_total'], '', grand_time_fmt)
+
+            ws.write(row, summary_col['present_days'],      present_days,              summary_int)
+            ws.write(row, summary_col['gazetted'],          gazetted_count,            int_cell)
+            ws.write(row, summary_col['paid_leaves'],       round(paid_days, 2),       dec_cell)
+            ws.write(row, summary_col['total_hours'],       round(total_hours, 2),     summary_dec)
+            ws.write(row, summary_col['total_worked_days'], present_days,              summary_int)
+            ws.write(row, summary_col['avg_worked_hours'],  round(avg_worked_hours, 2), summary_dec)
 
             row += 1
 
